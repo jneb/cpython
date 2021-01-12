@@ -4312,12 +4312,12 @@ long_invmod(PyLongObject *a, PyLongObject *n)
 /* Generate entries in the table to make sure the proper one is there
  * uses square and c
  */
-#define ENSURE_TABLE_ENTRY(chunk)                             \
-    do {                                                   \
-        while(tableSize < chunk / 2) {                     \
-            MULTMODC(aSquare, table[tableSize], table[tableSize + 1]); \
-            tableSize++;                                   \
-        }                                                  \
+#define ENSURE_TABLE_ENTRY(chunk)                                          \
+    do {                                                                \
+        while(tableSize < chunk / 2) {                                  \
+            MULTMODC(aSquared, table[tableSize], table[tableSize + 1]); \
+            tableSize++;                                                \
+        }                                                               \
     } while (0);
 
 
@@ -4501,33 +4501,43 @@ PyLongObject* addition_chain(
     // Determine the optimal chunk size, first digit, number of rest
     chunkSize = prepare_pow(b, &currentDigit, &restOfDigits);
 
+    // handle 0th power
+    if (!currentDigit)
+        return PyLong_FromLong(1L);
+
     // Prepare the table
     table[0] = (PyLongObject*)a;
     tableSize = 0;
     Py_INCREF(a);
 
-    // Skip the computation of aSquared for trivial exponents
+    // Skip the computation of aSquared for exponent 1
     // because it isn't used
     if (restOfDigits || (currentDigit > 1))
         MULTMODC(a, a, aSquared);
 
-    // Note: the actual initalisation of result is in the middle of this loop!
+    // The loop does this
+    // Find a power of at most chunkSize bits that is odd
+    // Look up in the table (generating it if needed)
+    // From then on, repeatedly square the result
+    // and multiply with as high as possible table entries
+    // taking into account that there are only odd entries
+    // squaresToDo keeps the number of squares before getting a new digit
+    // bitPosition keeps the location of the least significant bit of the chunk
+    int bitPosition, squaresToDo;
+    squaresToDo = 0;
+    bitPosition = _Py_bit_length64(currentDigit);
+    if (bitPosition < chunkSize)
+        bitPosition = 0;
+    else
+        bitPosition -= chunkSize;
 
     // loop over the digits
+    // Note: the actual initalisation of result is in the middle of this loop!
     while (1) {
-        // how many squares yet to do on the result for this digit
-        // this is nonsense if result still is NULL;
-        int squaresToDo = PYLONG_BITS_IN_DIGIT;
-        // loop over de chunks within a digit
+        // bitPosition is >= currentDigit.bit_length() - 1
         while (currentDigit) {
-            int bitPosition;
             uint8_t chunk;
-            // get a chunk
-            bitPosition = _Py_bit_length64(currentDigit);
-            if (bitPosition < chunkSize)
-                bitPosition = 0;
-            else
-                bitPosition -= chunkSize;
+            // get the chunk
             chunk = (uint8_t)(currentDigit >> bitPosition);
             // chunk > 0 at this point
             if (result) {
@@ -4576,14 +4586,20 @@ PyLongObject* addition_chain(
                     }
                     ENSURE_TABLE_ENTRY(chunk);
                     result = table[chunk / 2];
-                    
                 }
-                // result is a new copy of either a table entry or square
+                // start the computation from here
                 Py_INCREF(result);
                 squaresToDo = bitPosition;
             }
             // now all bits up to bitPosition are processed
             currentDigit &= ((uint64_t)1 << bitPosition) - 1;
+            // set bitPosition to get the maximum chunk
+            while (bitPosition && ((currentDigit >> bitPosition) == 0))
+                bitPosition--;
+            if (bitPosition < chunkSize - 1)
+                bitPosition = 0;
+            else
+                bitPosition -= chunkSize - 1;
         }
         // current digit has to ones anymore, but we may have to square a few times
         while (squaresToDo) {
@@ -4591,8 +4607,11 @@ PyLongObject* addition_chain(
             squaresToDo -= 1;
         }
         // fetch new digit, or stop
-        if (restOfDigits)
+        if (restOfDigits) {
             currentDigit = b->ob_digit[--restOfDigits];
+            squaresToDo = PYLONG_BITS_IN_DIGIT;
+            bitPosition = squaresToDo - chunkSize;
+        }
         else
             break;
     }
