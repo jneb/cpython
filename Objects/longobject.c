@@ -15,7 +15,7 @@ class int "PyObject *" "&PyLong_Type"
 [clinic start generated code]*/
 /*[clinic end generated code: output=da39a3ee5e6b4b0d input=ec0275e3422a36e3]*/
 
-static uint8_t lengths[16] = { 0, 1, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4 };
+static const uint8_t lengths[16] = { 0, 1, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4 };
 int _Py_bit_length(unsigned long x) {
     int result = 0;
     if (x >= 1 << 16) {
@@ -4453,6 +4453,17 @@ prepare_pow(PyLongObject* n, uint64_t* firstDigits, Py_ssize_t* restOfDigits)
     return 6;
 }
 
+// table for the addition chain routine to help find bit patterns
+// for chunk sizes 2 through 4 (last row is for 5 and 6)
+// tell how much bitPos needs to be corrected given digit >> bitPos
+static const signed char CHUNKJUMPTABLE[5][16] = {
+    //0  01  10  11 100 101 110 111 1000 1001 1010 1011 1100 1101 1110 1111
+    {-4, -3,  1,  0,  2,  2,  1,  1,   3,   3,   3,   3,   2,   2,   2,   2},
+    {-4, -3, -2, -2,  2,  0,  1,  0,   3,   3,   1,   1,   2,   2,   1,   1},
+    {-4, -3, -2, -2, -1, -1, -1, -1,   3,   0,   1,   0,   2,   0,   1,   0},
+    { 4,  0,  1,  0,  2,  0,  1,  0,   3,   0,   1,   0,   2,   0,   1,   0}
+};
+
 /* Addition chain generator for the exponent function 
  * Compute power using an addition chain generator which is an optimized
  * and generalized version of the "5-ary" method from HAC 14.82
@@ -4476,6 +4487,7 @@ prepare_pow(PyLongObject* n, uint64_t* firstDigits, Py_ssize_t* restOfDigits)
  *  4-5: 8*5*6 = 240 bits
  *  5-6: 16*6*7 = 672 bits
  */
+
 static inline
 PyLongObject* addition_chain(
     PyLongObject* a, PyLongObject* b, PyLongObject* c)
@@ -4524,28 +4536,55 @@ PyLongObject* addition_chain(
     // squaresToDo keeps the number of squares before getting a new digit
     // bitPosition keeps the location of the least significant bit of the chunk
     int bitPosition, squaresToDo;
-    squaresToDo = 0;
     bitPosition = _Py_bit_length64(currentDigit);
-    if (bitPosition < chunkSize)
-        bitPosition = 0;
-    else
-        bitPosition -= chunkSize;
 
     // loop over the digits
     // Note: the actual initalisation of result is in the middle of this loop!
     while (1) {
-        // bitPosition is >= currentDigit.bit_length() - 1
+        // at this point, bitPosition is >= currentDigit.bit_length()
+        assert(currentDigit >> bitPosition == 0);
         while (currentDigit) {
+            if (chunkSize <= 4) {
+                // adjust bitPosition jumping by four using table
+                signed char delta = -4;
+                do {
+                    bitPosition += delta;
+                    if (bitPosition < 0) {
+                        // overshoot. This means that currentDigits has fewer bits than chunkSize
+                        // fortunately, our table can be used to fix it
+                        // put that value in delta, since it will be added anyway
+                        bitPosition = 0;
+                        if (currentDigit == 1)
+                            delta = 0;
+                        else
+                            delta = CHUNKJUMPTABLE[0][currentDigit];
+                        break;
+                    }
+                    // determine new jump size
+                    delta = CHUNKJUMPTABLE[chunkSize - 2][currentDigit >> bitPosition];
+                } while (delta < 0);
+                bitPosition += delta;
+            }
+            else {
+                // adjust bitPosition in one step
+                bitPosition = _Py_bit_length64(currentDigit);
+                if (bitPosition < chunkSize)
+                    bitPosition = 0;
+                else
+                    bitPosition -= chunkSize;
+                bitPosition += CHUNKJUMPTABLE[3][(currentDigit >> bitPosition) & 0xf];
+                // since we only checked 4 bits
+                // value 2 is still possible if chunkSize = 6
+                if (currentDigit >> bitPosition == 2)
+                    bitPosition++;
+            }
+
             uint8_t chunk;
             // get the chunk
             chunk = (uint8_t)(currentDigit >> bitPosition);
-            // chunk > 0 at this point
+            // chunk is just right at this point thanks to the table
+            assert(chunk & 1);
             if (result) {
-                // make chunk odd, since table has only odd entries
-                while (!(chunk & 1)) {
-                    bitPosition += 1;
-                    chunk >>= 1;
-                };
                 // square until we are the proper position, then multiply
                 while (squaresToDo > bitPosition) {
                     MULTMODC(result, result, result);
@@ -4555,35 +4594,21 @@ PyLongObject* addition_chain(
                 MULTMODC(result, table[chunk / 2], result);
             }
             else {
-                // Initialize the loop here
-                // result is initialized directly from the table
-                // or from aSquared
-                if (chunk == 2) {
-                    // we already have this value
+                // Result gets initialized at this point, from a known value
+                // let's see if we can squeeze out a few more bits by using 2 or 9
+                if (bitPosition && chunk == 1) {
+                    bitPosition--;
+                    chunk = 2;
+                    assert(currentDigit >> bitPosition == chunk);
                     result = aSquared;
                 }
-                else if ((chunk == 4)
-                         && bitPosition
-                         && ((currentDigit >> (bitPosition - 1)) == 9)) {
-                    // we can extend the chunk to 9 if it is 4 at no cost
-                    // because we know chunkSize is 3, so likely entries 3, 5, 7
-                    // will be computed anyway in the loop
-                    bitPosition -= 1;
+                else if (bitPosition > 3 && currentDigit >> bitPosition - 4 == 9) {
+                    bitPosition -= 3;
                     chunk = 9;
+                    assert(currentDigit >> bitPosition == chunk);
                     ENSURE_TABLE_ENTRY(chunk);
                     result = table[chunk / 2];
-                }
-                else {
-                    // make chunk odd, since table has only odd entries
-                    while (!(chunk & 1)) {
-                        bitPosition += 1;
-                        chunk >>= 1;
-                    }
-                    if (chunk == 1 && bitPosition && (currentDigit >> (bitPosition - 1)) == 3) {
-                        // we can extend the chunk to 3 for free
-                        bitPosition -= 1;
-                        chunk = 3;
-                    }
+                } else {
                     ENSURE_TABLE_ENTRY(chunk);
                     result = table[chunk / 2];
                 }
@@ -4593,13 +4618,8 @@ PyLongObject* addition_chain(
             }
             // now all bits up to bitPosition are processed
             currentDigit &= ((uint64_t)1 << bitPosition) - 1;
-            // set bitPosition to get the maximum chunk
-            while (bitPosition && ((currentDigit >> bitPosition) == 0))
-                bitPosition--;
-            if (bitPosition < chunkSize - 1)
-                bitPosition = 0;
-            else
-                bitPosition -= chunkSize - 1;
+            // set bitPosition to get the maximum chunkk
+            bitPosition = squaresToDo;
         }
         // current digit has to ones anymore, but we may have to square a few times
         while (squaresToDo) {
@@ -4609,8 +4629,7 @@ PyLongObject* addition_chain(
         // fetch new digit, or stop
         if (restOfDigits) {
             currentDigit = b->ob_digit[--restOfDigits];
-            squaresToDo = PYLONG_BITS_IN_DIGIT;
-            bitPosition = squaresToDo - chunkSize;
+            bitPosition = squaresToDo = PYLONG_BITS_IN_DIGIT;
         }
         else
             break;
