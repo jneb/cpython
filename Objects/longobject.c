@@ -15,6 +15,43 @@ class int "PyObject *" "&PyLong_Type"
 [clinic start generated code]*/
 /*[clinic end generated code: output=da39a3ee5e6b4b0d input=ec0275e3422a36e3]*/
 
+static uint8_t lengths[16] = { 0, 1, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4 };
+int _Py_bit_length(unsigned long x) {
+    int result = 0;
+    if (x >= 1 << 16) {
+        result += 16; x >>= 16;
+    }
+    if (x >= 1 << 8) {
+        result += 8; x >>= 8;
+    }
+    if (x >= 1 << 4) {
+        result += 4; x >>= 4;
+    }
+    return result + lengths[x];
+}
+
+int _Py_bit_length64(uint64_t x) {
+    if (x >= (uint64_t)1 << 32)
+        return 32 + _Py_bit_length(x >> 32);
+    return _Py_bit_length((unsigned long)x);
+}
+
+int _Py_bit_count(unsigned long x) {
+#define o33333333333 0xDB6DB6DB
+#define o11111111111 0x49249249
+#define o30303030303 0xC30C30C3
+    // count bits in groups of three (octal: 0o
+    x = x - ((x >> 1) & o33333333333) - ((x >> 2) & o11111111111);
+    // combine groups to groups of six
+    x = ((x >> 3) & o30303030303) + (x & o30303030303);
+    // add groups together
+    return x % 63;
+}
+
+int _Py_bit_count64(uint64_t x) {
+    return _Py_bit_count(x >> 32) + _Py_bit_count((unsigned long)x);
+}
+
 #ifndef NSMALLPOSINTS
 #define NSMALLPOSINTS           257
 #endif
@@ -4000,8 +4037,8 @@ long_true_divide(PyObject *v, PyObject *w)
         /* Extreme underflow */
         goto underflow_or_zero;
     /* Next line is now safe from overflowing a Py_ssize_t */
-    diff = diff * PyLong_SHIFT + bits_in_digit(a->ob_digit[a_size - 1]) -
-        bits_in_digit(b->ob_digit[b_size - 1]);
+    diff = diff * PyLong_SHIFT + bit_length_digit(a->ob_digit[a_size - 1]) -
+        bit_length_digit(b->ob_digit[b_size - 1]);
     /* Now diff = a_bits - b_bits. */
     if (diff > DBL_MAX_EXP)
         goto overflow;
@@ -4277,13 +4314,9 @@ long_invmod(PyLongObject *a, PyLongObject *n)
  */
 #define ENSURE_TABLE_ENTRY(chunk)                             \
     do {                                                   \
-        if (chunk && !table[chunk / 2]) {                  \
-            uint8_t i;                                     \
-            for (i = chunk / 2; !table[--i];)              \
-                ;                                          \
-            while (i++ < chunk / 2) {                      \
-                MULTMODC(aSquare, table[i], table[i + 1]); \
-            }                                              \
+        while(tableSize < chunk / 2) {                     \
+            MULTMODC(aSquare, table[tableSize], table[tableSize + 1]); \
+            tableSize++;                                   \
         }                                                  \
     } while (0);
 
@@ -4337,7 +4370,7 @@ prepare_pow(PyLongObject* n, uint64_t* firstDigits, Py_ssize_t* restOfDigits)
     // number of Python digits in the exponent
     Py_ssize_t numberOfDigits = Py_SIZE(n);
 
-    // Handle the common case of numbers of at most 7 digits
+    // Handle the common case of numbers of at most 7 bits
     if (numberOfDigits == 0) {
         digit nValue = n->ob_digit[0];
         *firstDigits = nValue;
@@ -4361,7 +4394,7 @@ prepare_pow(PyLongObject* n, uint64_t* firstDigits, Py_ssize_t* restOfDigits)
         *restOfDigits = 0;
         int bitLength = _Py_bit_length64(upperBits);
         // we use this value to get insight in the bit pattern
-        int hamming2 = _Py_popcount64(upperBits & upperBits >> 2);
+        int hamming2 = _Py_bit_count64(upperBits & upperBits >> 2);
         // distinguish the prefixes
         // find reasons for choosing chunksize 2 or 4 instead of the default 3
         switch (upperBits >> (bitLength - 4)) {
@@ -4407,7 +4440,7 @@ prepare_pow(PyLongObject* n, uint64_t* firstDigits, Py_ssize_t* restOfDigits)
     *restOfDigits = numberOfDigits - DIGITS_IN_ULONG;
     // bit length of the upper bits for the prefix
     int upperBitLength = _Py_bit_length64(upperBits);
-    uint8_t prefix = (uint8_t)upperBits >> (upperBitLength - 4);
+    uint8_t prefix = (uint8_t)(upperBits >> (upperBitLength - 4));
     Py_ssize_t numberOfBits = upperBitLength + PYLONG_BITS_IN_DIGIT * numberOfDigits;
     // Now return the heuristic value for the chunk size
     // LENGHTSFOR3 would be [84, 0, 84, 0, 84, 0, 84, 0], but this is faster
@@ -4455,8 +4488,10 @@ PyLongObject* addition_chain(
     PyLongObject* result = 0;
     PyLongObject* table[32] = { 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
                                 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 };
-    // we always need the square of a, if we are here
-    PyLongObject* aSquare = 0;
+    // index of last full entry in table
+    int tableSize;
+    // if the exponent is larger than 1, we store the square here
+    PyLongObject* aSquared = 0;
     // for digit loop: value of current digit, and number to digits to process then
     uint64_t currentDigit = 0;
     Py_ssize_t restOfDigits = 0;
@@ -4465,26 +4500,23 @@ PyLongObject* addition_chain(
 
     // Determine the optimal chunk size, first digit, number of rest
     chunkSize = prepare_pow(b, &currentDigit, &restOfDigits);
-    // Handle trivial cases that do not use the main loop
-    if (restOfDigits == 0) {
-        if (currentDigit == 0)
-            return (PyLongObject*)PyLong_FromLong(1L);
-        if (currentDigit == 1) {
-            Py_INCREF(a);
-            return a;
-        }
-    }
 
-    // Power is 2 or higher; prepare table and square
+    // Prepare the table
     table[0] = (PyLongObject*)a;
+    tableSize = 0;
     Py_INCREF(a);
-    MULTMODC(a, a, aSquare);
 
-    // Actual initalisation of result is in the middle of this loop
+    // Skip the computation of aSquared for trivial exponents
+    // because it isn't used
+    if (restOfDigits || (currentDigit > 1))
+        MULTMODC(a, a, aSquared);
+
+    // Note: the actual initalisation of result is in the middle of this loop!
 
     // loop over the digits
     while (1) {
-        // how many squares to do on the result
+        // how many squares yet to do on the result for this digit
+        // this is nonsense if result still is NULL;
         int squaresToDo = PYLONG_BITS_IN_DIGIT;
         // loop over de chunks within a digit
         while (currentDigit) {
@@ -4510,15 +4542,15 @@ PyLongObject* addition_chain(
                     squaresToDo -= 1;
                 }
                 ENSURE_TABLE_ENTRY(chunk);
-                MULTMODC(result, table[chunk], result);
+                MULTMODC(result, table[chunk / 2], result);
             }
             else {
-                // result not initialized; start the process
-                // our goal is to have result = tableFetch(chunk)
-                // but chunk can be even, and there are many optimization
+                // Initialize the loop here
+                // result is initialized directly from the table
+                // or from aSquared
                 if (chunk == 2) {
                     // we already have this value
-                    result = aSquare;
+                    result = aSquared;
                 }
                 else if ((chunk == 4)
                          && bitPosition
@@ -4529,7 +4561,7 @@ PyLongObject* addition_chain(
                     bitPosition -= 1;
                     chunk = 9;
                     ENSURE_TABLE_ENTRY(chunk);
-                    result = table[chunk];
+                    result = table[chunk / 2];
                 }
                 else {
                     // make chunk odd, since table has only odd entries
@@ -4541,9 +4573,10 @@ PyLongObject* addition_chain(
                         // we can extend the chunk to 3 for free
                         bitPosition -= 1;
                         chunk = 3;
-                        ENSURE_TABLE_ENTRY(chunk);
-                        result = table[chunk];
                     }
+                    ENSURE_TABLE_ENTRY(chunk);
+                    result = table[chunk / 2];
+                    
                 }
                 // result is a new copy of either a table entry or square
                 Py_INCREF(result);
@@ -4559,7 +4592,7 @@ PyLongObject* addition_chain(
         }
         // fetch new digit, or stop
         if (restOfDigits)
-            currentDigit = a->ob_digit[--restOfDigits];
+            currentDigit = b->ob_digit[--restOfDigits];
         else
             break;
     }
@@ -4569,8 +4602,8 @@ Error:
     /* fall through */
 Done:
     // Clean up, make sure we leave no pointers to dead objects
-    Py_CLEAR(aSquare);
-    for (int i = 0; table[i]; i++)
+    Py_CLEAR(aSquared);
+    for (int i = 0; i < 32 && table[i]; i++)
         Py_CLEAR(table[i]);
     return result;
 }
@@ -4584,7 +4617,6 @@ long_pow(PyObject *v, PyObject *w, PyObject *x)
     int negativeOutput = 0;  /* if x<0 return negative output */
 
     PyLongObject *z = NULL;  /* accumulated result */
-    Py_ssize_t i, j, k;             /* counters */
     PyLongObject *temp = NULL;
 
 
