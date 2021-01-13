@@ -4310,7 +4310,7 @@ long_invmod(PyLongObject *a, PyLongObject *n)
     } while(0)
 
 /* Generate entries in the table to make sure the proper one is there
- * uses square and c
+ * uses aSquare and c
  */
 #define ENSURE_TABLE_ENTRY(chunk)                                          \
     do {                                                                \
@@ -4400,7 +4400,7 @@ prepare_pow(PyLongObject* n, uint64_t* firstDigits, Py_ssize_t* restOfDigits)
         switch (upperBits >> (bitLength - 4)) {
         case 8:
         case 12:
-            if (bitLength < 14 || hamming2 < 4 + 25 / (bitLength - 14))
+            if (bitLength <= 14 || hamming2 < 4 + 25 / (bitLength - 14))
                 return 2;
             break;
         case 9:
@@ -4535,8 +4535,8 @@ PyLongObject* addition_chain(
     // taking into account that there are only odd entries
     // squaresToDo keeps the number of squares before getting a new digit
     // bitPosition keeps the location of the least significant bit of the chunk
-    int bitPosition, squaresToDo;
-    bitPosition = _Py_bit_length64(currentDigit);
+    int bitPosition = _Py_bit_length64(currentDigit); 
+    int squaresToDo = 0;
 
     // loop over the digits
     // Note: the actual initalisation of result is in the middle of this loop!
@@ -4602,23 +4602,22 @@ PyLongObject* addition_chain(
                     assert(currentDigit >> bitPosition == chunk);
                     result = aSquared;
                 }
-                else if (bitPosition > 3 && currentDigit >> bitPosition - 4 == 9) {
-                    bitPosition -= 3;
-                    chunk = 9;
-                    assert(currentDigit >> bitPosition == chunk);
-                    ENSURE_TABLE_ENTRY(chunk);
-                    result = table[chunk / 2];
-                } else {
+                else {
+                    if (bitPosition > 3 && currentDigit >> bitPosition - 4 == 9) {
+                        bitPosition -= 3;
+                        chunk = 9;
+                        assert(currentDigit >> bitPosition == chunk);
+                    }
                     ENSURE_TABLE_ENTRY(chunk);
                     result = table[chunk / 2];
                 }
-                // start the computation from here
+                // start the computation from here with a new value
                 Py_INCREF(result);
                 squaresToDo = bitPosition;
             }
             // now all bits up to bitPosition are processed
             currentDigit &= ((uint64_t)1 << bitPosition) - 1;
-            // set bitPosition to get the maximum chunkk
+            // set bitPosition to get the maximum chunk
             bitPosition = squaresToDo;
         }
         // current digit has to ones anymore, but we may have to square a few times
@@ -4639,9 +4638,9 @@ Error:
     Py_CLEAR(result);
     /* fall through */
 Done:
-    // Clean up, make sure we leave no pointers to dead objects
     Py_CLEAR(aSquared);
-    for (int i = 0; i < 32 && table[i]; i++)
+    // Yes the table is tableSize + 1 entries, I know
+    for (int i = 0; i <= tableSize; i++)
         Py_CLEAR(table[i]);
     return result;
 }
@@ -4734,6 +4733,7 @@ long_pow(PyObject *v, PyObject *w, PyObject *x)
                 goto Error;
             Py_DECREF(a);
             a = temp;
+            temp = NULL;
         }
 
         /* Reduce base by modulus in some cases:
@@ -4778,7 +4778,6 @@ long_pow(PyObject *v, PyObject *w, PyObject *x)
     Py_DECREF(a);
     Py_DECREF(b);
     Py_XDECREF(c);
-    Py_XDECREF(temp);
     return (PyObject *)z;
 }
 
