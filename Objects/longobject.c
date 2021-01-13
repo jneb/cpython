@@ -4603,7 +4603,7 @@ PyLongObject* addition_chain(
                     result = aSquared;
                 }
                 else {
-                    if (bitPosition > 3 && currentDigit >> bitPosition - 4 == 9) {
+                    if (bitPosition > 3 && currentDigit >> (bitPosition - 4) == 9) {
                         bitPosition -= 3;
                         chunk = 9;
                         assert(currentDigit >> bitPosition == chunk);
