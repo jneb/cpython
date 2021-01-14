@@ -1,11 +1,15 @@
 #!python3
 """Investigation of how useful it is to optimize Python powers.
+(I am talking about integer-to-integer powers here, that are implemented
+by repeated multiplications.)
 In Python 3.9 and earlier, there were two algorithms:
 - the binary method which is the regular "left to right" method of powering.
 - the "fiveary" method, which is actually 32-are, which precomputes the powers
   zero through 31 and than scans the exponent 5 bits at a time.
 There is a hard boundary of quite a large number of bits, where there is a
 switch from one method to another.
+
+But we can do better than that. First some exaplanation.
 
 Both methods use the same basic algorithm:
 - Start with a small power that is equal to the first few bits of the exponent
@@ -14,15 +18,18 @@ Both methods use the same basic algorithm:
 In the binary case, a multiplication could occur at every squaring.
 In the fiveary case, a multiplication was considered every five squarings.
 
-I investigated if this can be improved upon:
+I investigated if this can be improved upon by generalizing the fiveary method:
 - using different bases than just 2 and 32, to make a smooth transition
 - making computation of the table more efficient
 - vary the base not only on the length of the number, but also on other
   characteristics to make it more efficient for smaller numbers
   Actually, the first number where this happens is 15.
 
-So, first I wrote a routine that does the "generalized fiveary method" that
+So, first I wrote a routine that does this "generalized fiveary method" that
 uses a given "chunkSize" indicate how many bits are use at one time.
+Below you find a Python routine called otfR (for historic reasons) that
+calculates the number of squarings and multiplications, implicitly defining
+the algorithm.
 This routine uses the following optimizations:
 - the table only contains odd entries, since an even entry can be handled
   simply by doing the multiplication at an earlier time
@@ -34,11 +41,13 @@ This routine uses the following optimizations:
   start one bit ahead.
 - No muliplication will be done at all if there are zeros in the exponent
 
-The result of this is that chunkSize 1 will no longer be used, since chunkSize
-2 does never use more multplies that chunkSize 1 Also, using the same 32 entry
-table, we can go up to chunk size 6 instead of 5 And finally, since the the
-zeros are skipped, chunkSize n corresponds to chunkSize n+1 of the old method,
-so chunkSize 4 is as fast as the fiveary method!
+The result of this is that the binary method (corresponding to chunkSize 1)
+is no longer needed, since chunkSize 2 does never use more multiplies than
+chunkSize 1. Also, using the same 32 entry table of the fiveary method,
+we can go up to chunk size 6 instead of 5. And finally, since the zeros in
+the number are skipped, chunkSize n corresponds to chunkSize n+1 of the old
+method, so chunkSize 4 is as fast as the fiveary method, and we effectively
+are now up to chunksize 7!
 
 Now, the question remains what is the best chunkSize to use.
 Here we call numberLength the number of bits in the exponent, as given by
@@ -69,26 +78,44 @@ chunkSize    min #mults   max #mults
 5          450  551.2   1296 1538.2 
 6         1296 1538.3   -
 
-But you would be mistaken.
+But you would be mistaken, since the other optimizations in the routine influence
+matters a lot.
 Some numbers are happy with a small chunkSize (two powers for example), while
 other are much more efficient is the chunkSize is bigger (like numbers with
 many ones in their pattern).
-I found that if you ignored that, the performance would suffer even for quite small numbers. So I wanted to optimize for that, too.
-After a lot of experimentation, I found that there are two parameters that are relatively easy to compute, that give an indication on the optimal chunk size. I order of effect:
+I found that if you ignored that, the performance would suffer even for quite
+small numbers. So I wanted to optimize for that, too.
+After a lot of experimentation and days of number crunching, I found that there
+are two parameters, that are relatively easy to compute, that give an good indication
+on the optimal chunk size. I order of effect:
 - the initial bits of the number (I chose to use four bits): the prefix
 - the pairs in the number that are two bits apart: (n&n>>2).bit_length()
 - the length of the number
-There are also other parameters, but these turned out to be good. Fortunately, the bit pattern doesn't make much of a difference for longer numbers, so I chose not to compute that if it didn't fit in 60 bits.
+There are also other parameters, but these turned out to be good. The routine 
+calculating this is called good_chunksize below.
+But of course, for very long number even calculating these pairs is complicated.
+Fortunately,the bit pattern doesn't make much of a difference for longer numbers,
+so I chose not to compute the bit pattern if it didn't fit in 60 bits.
+The routine fastChunksize below does that.
 
-Then I had to find an algorithm that would choose a good chunkSize in the three dimensional space of the three parameters.
+The routine goodChunksize performs an algorithm to choose a good chunkSize in
+the three dimensional space of the three parameters.
 The Python code below explores that space, so you can see for yourself how well I did.
-I ended up with an algorithm that is partly table based, but the really complicated shapes consist of 8 simple curves indexed by prefix.
-The routine below were used to construct these curves.
-And finally, I had to convert all that to C.
-First, I extended test_pow to find all little corner cases, so that all places
-in the code would be touched. That was quite useful, as I found that many bugs
+I ended up with an algorithm that is partly table based, but the really
+complicated shapes consist of 8 simple curves indexed by prefix.
+The other routines below were used to construct these curves.
+
+And finally, I had to convert all that to C, and debug it.
+There were two challenges:
+- getting the reference counts right (of course)
+- making sure the fastChunksize algorithm is actually implemented.
+For that latter problem, I started with extendeding test_pow to find all
+little corner cases, so that all places in the code would be touched. Then I checked
+if all cases were indeed touched. That was quite useful, as I found that most bugs
 appeared just because a certain point in the routine never was reached, while I
 knew from the research that it actually would occur.
+So, if you are still interested, here's the code.
+- Jurjen Bos, januari 2021
 """
 
 import re
