@@ -4282,6 +4282,14 @@ long_invmod(PyLongObject *a, PyLongObject *n)
     return NULL;
 }
 
+// TODO:
+// read the code
+// check documentation (e.g. the macros right below here need some explanation about their context)
+// check bit operation routines
+// rename longobject.py to addition_chain.py
+// put a long story on the working in there
+// move all over to 3.10
+
 /* Perform a modular reduction, X = X % c, but leave X alone if c
  * is NULL.
  */
