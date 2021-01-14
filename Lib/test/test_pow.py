@@ -1,5 +1,6 @@
 import math
 import unittest
+from random import getrandbits
 
 class PowTest(unittest.TestCase):
 
@@ -150,7 +151,7 @@ class PowTest(unittest.TestCase):
         for length in range(60, 1000):
             for prefix in range(8, 16):
                 n = prefix << length - 4 | getrandbits(length - 4)
-        self.assertEqual(pow(base, n, prime), pow(base, n % (prime - 1), prime))
+                self.assertEqual(pow(base, n, prime), pow(base, n % (prime - 1), prime))
 
     def test_heuristic(self):
         # test all cases of the heuristic addition chain optimizer

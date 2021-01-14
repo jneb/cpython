@@ -4371,16 +4371,20 @@ prepare_pow(PyLongObject* n, uint64_t* firstDigits, Py_ssize_t* restOfDigits)
     Py_ssize_t numberOfDigits = Py_SIZE(n);
 
     // Handle the common case of numbers of at most 7 bits
-    if (numberOfDigits == 0) {
+    if (numberOfDigits <= 1) {
         digit nValue = n->ob_digit[0];
         *firstDigits = nValue;
         *restOfDigits = 0;
         if (nValue < 16)
+            // four bits or less
             return 2;
-        // since the digit is now at least four bits, we can compute the prefix
-        int bitLength = bit_length_digit(nValue);
-        int prefix = nValue >> (bitLength - 4);
-        return CHUNKSIZES5TO7[prefix - 8];
+        if (nValue < 128) {
+            // seven bits or less
+            // since the digit is now at least four bits, we can compute the prefix
+            int bitLength = bit_length_digit(nValue);
+            int prefix = nValue >> (bitLength - 4);
+            return CHUNKSIZES5TO7[prefix - 8];
+        }
     }
 
     /* Handle numbers of up to 60 bits
@@ -4389,7 +4393,7 @@ prepare_pow(PyLongObject* n, uint64_t* firstDigits, Py_ssize_t* restOfDigits)
      * This code is all heuristic; all is does is return 2, 3 or 4
      * A wrong result wouldn't break the code, just make it slower
      */
-    if (numberOfDigits < DIGITS_IN_ULONG) {
+    if (numberOfDigits <= DIGITS_IN_ULONG) {
         *firstDigits = upperBits = PyLong_AsUnsignedLongLong((PyObject*)n);
         *restOfDigits = 0;
         int bitLength = _Py_bit_length64(upperBits);
@@ -4441,7 +4445,7 @@ prepare_pow(PyLongObject* n, uint64_t* firstDigits, Py_ssize_t* restOfDigits)
     // bit length of the upper bits for the prefix
     int upperBitLength = _Py_bit_length64(upperBits);
     uint8_t prefix = (uint8_t)(upperBits >> (upperBitLength - 4));
-    Py_ssize_t numberOfBits = upperBitLength + PYLONG_BITS_IN_DIGIT * numberOfDigits;
+    Py_ssize_t numberOfBits = upperBitLength + PYLONG_BITS_IN_DIGIT * *restOfDigits;
     // Now return the heuristic value for the chunk size
     // LENGHTSFOR3 would be [84, 0, 84, 0, 84, 0, 84, 0], but this is faster
     if ((numberOfBits < 84) && !(prefix & 1))
@@ -4454,7 +4458,7 @@ prepare_pow(PyLongObject* n, uint64_t* firstDigits, Py_ssize_t* restOfDigits)
 }
 
 // table for the addition chain routine to help find bit patterns
-// for chunk sizes 2 through 4 (last row is for 5 and 6)
+// for chunk sizes 2 through 4 (last row is for clipping zeros at the end)
 // tell how much bitPos needs to be corrected given digit >> bitPos
 static const signed char CHUNKJUMPTABLE[5][16] = {
     //0  01  10  11 100 101 110 111 1000 1001 1010 1011 1100 1101 1110 1111
@@ -4473,7 +4477,7 @@ static const signed char CHUNKJUMPTABLE[5][16] = {
  * processed per step.
  * computes result = pow(a, b, c)
  * assumes b >= 0
- * gererates a new reference
+ * does not release a,b nor c
  *
  * Differences with the HAC method:
  *    The table contains only odd entries saving 50% on building time
@@ -4518,9 +4522,18 @@ PyLongObject* addition_chain(
         return PyLong_FromLong(1L);
 
     // Prepare the table
-    table[0] = (PyLongObject*)a;
+    // since a can be > c, it must be reduced
+    if (c != NULL) {
+        if (l_divmod(a, c, NULL, &temp) < 0)
+            goto Error;
+        table[0] = temp;
+        temp = NULL;
+    }
+    else {
+        table[0] = (PyLongObject*)a;
+    }
+    Py_INCREF(table[0]);
     tableSize = 0;
-    Py_INCREF(a);
 
     // Skip the computation of aSquared for exponent 1
     // because it isn't used
@@ -4557,7 +4570,7 @@ PyLongObject* addition_chain(
                         if (currentDigit == 1)
                             delta = 0;
                         else
-                            delta = CHUNKJUMPTABLE[0][currentDigit];
+                            delta = CHUNKJUMPTABLE[3][currentDigit];
                         break;
                     }
                     // determine new jump size
@@ -4603,6 +4616,7 @@ PyLongObject* addition_chain(
                     result = aSquared;
                 }
                 else {
+                    // result is NULL
                     if (bitPosition > 3 && currentDigit >> (bitPosition - 4) == 9) {
                         bitPosition -= 3;
                         chunk = 9;
@@ -4638,6 +4652,7 @@ Error:
     Py_CLEAR(result);
     /* fall through */
 Done:
+    assert(tableSize < 32);
     Py_CLEAR(aSquared);
     // Yes the table is tableSize + 1 entries, I know
     for (int i = 0; i <= tableSize; i++)
