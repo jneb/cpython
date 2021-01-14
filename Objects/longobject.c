@@ -4282,16 +4282,10 @@ long_invmod(PyLongObject *a, PyLongObject *n)
     return NULL;
 }
 
-// TODO:
-// read the code
-// check documentation (e.g. the macros right below here need some explanation about their context)
-// check bit operation routines
-// rename longobject.py to addition_chain.py
-// put a long story on the working in there
-// move all over to 3.10
-
+// Beginning of addition chain code
 /* Perform a modular reduction, X = X % c, but leave X alone if c
  * is NULL.
+ * This routine is used both in long_pow and in addition_chain
  */
 #define REDUCEMODC(X)                                       \
     do {                                                \
@@ -4319,6 +4313,7 @@ long_invmod(PyLongObject *a, PyLongObject *n)
 
 /* Generate entries in the table to make sure the proper one is there
  * uses aSquare and c
+ * Used in addition_chain
  */
 #define ENSURE_TABLE_ENTRY(chunk)                                          \
     do {                                                                \
@@ -4331,7 +4326,7 @@ long_invmod(PyLongObject *a, PyLongObject *n)
 
 /* The routine prepare_pow gives chooses a chunksize
  * that produces a number of multiplications very close to optimal for
- * the addition chain routine
+ * the addition chain routine.
  * This piece of horrible black belt voodoo magic code produces
  * the best chunksize value to use for exponentiations.
  * The problem is that the best way to produce a power (i.e. generate
@@ -4349,6 +4344,7 @@ long_invmod(PyLongObject *a, PyLongObject *n)
  *    Optimal = the best parameter for the routine below
  *    Good = what the routine below returns
  *    Difference = with respect to binary (HAC Algorithm 14.79)
+ * Full explanation how I did this is in Misc/additionchain.txt
 */
 
 // Number of Python digits that fit in an ulong
@@ -4356,12 +4352,11 @@ long_invmod(PyLongObject *a, PyLongObject *n)
 
  /* Compute for the power routine:
   * - The first up to 60 bits of the exponent
-  * - the number of extra digits to be expected
+  * - the number of extra digits following these
   * - a heuristics based good value for chunksize
-  * n is a PyLong that is >0
+  * n is a PyLong that is >0, borrowed reference
   */
 
-// Heuristic constants. See expHeuristics.txt
 static const unsigned char CHUNKSIZES5TO7[8] = {
     2, 3, 2, 3, 2, 3, 2, 2 };
 static const unsigned char LENGTHSFOR4[8] = {
@@ -4388,7 +4383,8 @@ prepare_pow(PyLongObject* n, uint64_t* firstDigits, Py_ssize_t* restOfDigits)
             return 2;
         if (nValue < 128) {
             // seven bits or less
-            // since the digit is now at least four bits, we can compute the prefix
+            // since the digit is now at least four bits,
+            // we can compute the prefix
             int bitLength = bit_length_digit(nValue);
             int prefix = nValue >> (bitLength - 4);
             return CHUNKSIZES5TO7[prefix - 8];
@@ -4466,7 +4462,7 @@ prepare_pow(PyLongObject* n, uint64_t* firstDigits, Py_ssize_t* restOfDigits)
 }
 
 // table for the addition chain routine to help find bit patterns
-// for chunk sizes 2 through 4 (last row is for clipping zeros at the end)
+// for chunk sizes 2 through 4 (last row is for clipping zeros)
 // tell how much bitPos needs to be corrected given digit >> bitPos
 static const signed char CHUNKJUMPTABLE[5][16] = {
     //0  01  10  11 100 101 110 111 1000 1001 1010 1011 1100 1101 1110 1111
@@ -4485,7 +4481,7 @@ static const signed char CHUNKJUMPTABLE[5][16] = {
  * processed per step.
  * computes result = pow(a, b, c)
  * assumes b >= 0
- * does not release a,b nor c
+ * used borrowed reference to a, b, c
  *
  * Differences with the HAC method:
  *    The table contains only odd entries saving 50% on building time
@@ -4527,26 +4523,29 @@ PyLongObject* addition_chain(
 
     // handle 0th power
     if (!currentDigit)
-        return PyLong_FromLong(1L);
+        return (PyLongObject*)PyLong_FromLong(1L);
 
-    // Prepare the table
+    // Prepare the table by storing a in table[0]
+    // table[0] could be the result of the call
     // since a can be > c, it must be reduced
     if (c != NULL) {
         if (l_divmod(a, c, NULL, &temp) < 0)
             goto Error;
-        table[0] = temp;
-        temp = NULL;
     }
     else {
-        table[0] = (PyLongObject*)a;
+        // Make sure we have a long in the table, because it could be something int-like
+        temp = (PyLongObject*)long_long((PyObject*)a);
+        if (temp == NULL)
+            goto Error;
     }
-    Py_INCREF(table[0]);
+    table[0] = temp;
+    temp = NULL;
     tableSize = 0;
 
     // Skip the computation of aSquared for exponent 1
     // because it isn't used
     if (restOfDigits || (currentDigit > 1))
-        MULTMODC(a, a, aSquared);
+        MULTMODC(table[0], table[0], aSquared);
 
     // The loop does this
     // Find a power of at most chunkSize bits that is odd
@@ -4624,7 +4623,8 @@ PyLongObject* addition_chain(
                     result = aSquared;
                 }
                 else {
-                    // result is NULL
+                    // fetch from table, but first see if it is useful
+                    // to compute one extra entry...
                     if (bitPosition > 3 && currentDigit >> (bitPosition - 4) == 9) {
                         bitPosition -= 3;
                         chunk = 9;
@@ -4633,7 +4633,7 @@ PyLongObject* addition_chain(
                     ENSURE_TABLE_ENTRY(chunk);
                     result = table[chunk / 2];
                 }
-                // start the computation from here with a new value
+                // start the computation from here
                 Py_INCREF(result);
                 squaresToDo = bitPosition;
             }
@@ -4660,14 +4660,12 @@ Error:
     Py_CLEAR(result);
     /* fall through */
 Done:
-    assert(tableSize < 32);
     Py_CLEAR(aSquared);
     // Yes the table is tableSize + 1 entries, I know
     for (int i = 0; i <= tableSize; i++)
         Py_CLEAR(table[i]);
     return result;
 }
-
 
 /* pow(v, w, x) */
 static PyObject *
@@ -4798,6 +4796,7 @@ long_pow(PyObject *v, PyObject *w, PyObject *x)
     Py_CLEAR(z);
     /* fall through */
   Done:
+    assert(temp == NULL);
     Py_DECREF(a);
     Py_DECREF(b);
     Py_XDECREF(c);
