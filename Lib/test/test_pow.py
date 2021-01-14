@@ -155,6 +155,8 @@ class PowTest(unittest.TestCase):
     def test_heuristic(self):
         # test all cases of the heuristic addition chain optimizer
         prime = 10 ** 17 - 3
+        for n in range(1 << 8):
+            self.assertEqual(2 ** n, 1 << n)
         for length in range(8,61):
             for ones in range(length - 3):
                 pattern = (1 << ones) - 1
