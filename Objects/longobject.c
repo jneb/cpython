@@ -4660,6 +4660,7 @@ Error:
     Py_CLEAR(result);
     /* fall through */
 Done:
+    assert(tableSize <= 32);
     Py_CLEAR(aSquared);
     // Yes the table is tableSize + 1 entries, I know
     for (int i = 0; i <= tableSize; i++)
